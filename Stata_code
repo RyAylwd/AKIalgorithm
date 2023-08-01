@@ -1,0 +1,161 @@
+*setup 
+sort study_patient_id creat_dt 
+*creatinine result counter 
+bysort study_patient_id (creat_dt) : gen creat_N = _N 
+bysort study_patient_id (creat_dt) : gen creat_count = _n 
+sum creat_count, d
+local count = (r(max)) 
+bysort study_patient_id (creat_dt) : gen next_creat_dt = creat_dt[_n+1]
+format next_creat_dt %d  
+
+*input:
+* creatinine (umol/L)
+* creat_dt (date of creatinine result)
+* study_patient_id (id variable)
+
+*replace the lowest creatinine of the day with the highest to prevent AKI flagging
+bysort study_patient_id creat_dt : replace creatinine = max_creat_day
+
+*output:
+gen aki_restart=.
+gen aki_base2d=.
+gen aki_base7d=.
+gen aki_base365d=.
+gen aki_yn=0
+gen aki_stage=0
+gen aki2d=0
+gen aki7d=0
+gen aki365d=0
+gen aki_start_dt=.
+gen aki_end_dt=.
+gen aki_ever=0
+
+******************************************************************************** 
+*first creatinine result - no AKI possible on the first ever creatinine 
+replace aki_stage=. if creat_count==1 
+replace aki_yn=. if creat_count==1 
+replace aki_restart=. if creat_count==1
+replace aki2d=. if creat_count==1
+replace aki7d=. if creat_count==1
+replace aki365d=. if creat_count==1
+replace aki_ever=. if creat_count==1
+
+********************************************************************************
+*loop over each creatinine result following the first 
+qui forvalues i = 2/`count' { // start at the second creatinine result `count'
+	
+	*set up 
+	display `i' " out of `count' " // number of creatinine observation  `count'
+	*determine if AKI has ever occured 
+	bysort study_patient_id (creat_dt) : replace aki_ever = 1 if sum(aki_yn)>0 & creat_count==`i'
+	
+	*restart the episode period after recovery assessment made or if 7 days has elapsed 
+
+    bysort study_patient_id (creat_dt) : egen last_aki_end_dt`i' = max(cond(aki_yn == 1, aki_end_dt, .)) // most recent AKI end date
+	bysort study_patient_id (creat_dt) : replace aki_restart = 1 if (creat_dt>last_aki_end_dt`i') & !missing(last_aki_end_dt`i') 
+	
+	*use creatinine results if no AKI previously occurred or delete results from before the AKI   
+	bysort study_patient_id (creat_dt) : gen creat_dt_`i' = creat_dt if last_aki_end_dt`i'<creat_dt & !missing(last_aki_end_dt`i') //remove all results from before the episode - if a new AKI episode occurs after a previous AKI resolves
+	bysort study_patient_id (creat_dt) : replace creat_dt_`i' = creat_dt if creat_dt_`i'==. & missing(last_aki_end_dt`i') // if there is no reason to reset the baseline creatinine values - use all historic values 
+	bysort study_patient_id (creat_dt) : gen current_dt`i' = creat_dt if creat_count==`i' // creat_dt of the current creat  
+	bysort study_patient_id (creat_dt) : egen max_dt`i' = max(current_dt`i') // copy the current date across all obs
+	
+	****************************************************************************
+	*Assess baseline 
+	// add in code to only use outpatient results as baseline?
+	
+	*decide if a fixed or updated baseline should be used to assess today's creatinine based on previous AKI episodes 
+		
+		*find baseline period 
+		bysort study_patient_id (creat_dt) : gen mark2d`i' = 1 if (max_dt`i'-creat_dt_`i')<=2 & (max_dt`i'-creat_dt_`i')>=0 // 0 - 2 days (48 hours) lookback period 
+		bysort study_patient_id (creat_dt) : gen mark7d`i'  = 1 if (max_dt`i'-creat_dt_`i')<=7 & (max_dt`i'-creat_dt_`i')>=0 // 0 - 7 days lookback period 
+		bysort study_patient_id (creat_dt) : gen mark365d`i' = 1 if (max_dt`i'-creat_dt_`i')<=365 & (max_dt`i'-creat_dt_`i')>7 // 8 - 365 days lookback period 
+	
+		*use the creatinine value during the appropriate time period 
+		bysort study_patient_id (creat_dt) : gen creat2d`i' = creatinine if (mark2d`i' == 1 ) 
+		bysort study_patient_id (creat_dt) : gen creat7d`i' = creatinine if (mark7d`i' == 1 )
+		bysort study_patient_id (creat_dt) : gen creat365d`i' = creatinine if (mark365d`i' == 1 )
+	
+		*find lowest/ median baseline creatinine 
+		bysort study_patient_id (creat_dt) : egen low2d`i' = min(creat2d`i')
+		bysort study_patient_id (creat_dt) : egen low7d`i' = min(creat7d`i')
+		bysort study_patient_id (creat_dt) : egen median365d`i' = median(creat365d`i') 
+		
+		*if AKI ongoing - anchor the baseline to previous baseline value 
+		bysort study_patient_id (creat_dt) : egen last_aki_st_dt`i' = max(aki_start_dt) // most recent AKI date
+		bysort study_patient_id (creat_dt) : gen recass7_dt`i' = last_aki_st_dt`i'+6 // maximum AKI window 'recovery assessment' will be updated to always reflect the most recent AKI episode 
+		
+		bysort study_patient_id (creat_dt) : replace low2d`i' = aki_base2d[_n-1] if recass7_dt`i'>=creat_dt & !missing(recass7_dt`i') //if yes - copy the previous baseline used if AKI was within the last 7 days
+		bysort study_patient_id (creat_dt) : replace low7d`i' = aki_base7d[_n-1] if recass7_dt`i'>=creat_dt & !missing(recass7_dt`i') //if yes - copy the previous baseline used if AKI was within the last 7 days
+		bysort study_patient_id (creat_dt) : replace median365d`i' = aki_base365d[_n-1] if recass7_dt`i'>=creat_dt & !missing(recass7_dt`i') //if yes - copy the previous baseline used if AKI was within the last 7 days
+
+	*determine index:baseline ratio and creatinine difference value 
+	bysort study_patient_id (creat_dt) : gen current_creat`i' = creatinine if creat_count==`i' // current creatinine being evaluated 
+	bysort study_patient_id (creat_dt) : egen max_creat`i' = max(current_creat`i') // copy current creat across all obs 
+	
+	****************************************************************************
+	*Assess for AKI 
+	
+	*flag AKI 1
+	gen flag2d`i'=1 if (max_creat`i'-creat2d`i')>=26.5 & (max_creat`i'-creat2d`i')!=. // increase in creatinine >= 26.5 umol/L
+	gen flag7d`i'=1 if (max_creat`i'/low7d`i')>= 1.5 & (max_creat`i'/low7d`i')<2 // increase >= 1.5x baseline 
+	gen flag365d`i'=1 if (max_creat`i'/median365d`i')>= 1.5 & (max_creat`i'/median365d`i')<2 // increase >= 1.5x baseline 
+	
+	*flag AKI 2
+	replace flag7d`i'=2 if (max_creat`i'/low7d`i')>=2 & (max_creat`i'/low7d`i')<3 // increase in creatinine >= 2 but < 3
+	replace flag365d`i'=2 if (max_creat`i'/median365d`i')>=2 & (max_creat`i'/median365d`i')<3 // increase in creatinine >= 2 but < 3 
+	
+	*flag AKI 3
+	replace flag7d`i'=3 if (max_creat`i'/low7d`i')>=3 & (max_creat`i'/low7d`i')!=. // increase in creatinine >= 3 
+	replace flag365d`i'=3 if (max_creat`i'/median365d`i')>=3 & (max_creat`i'/median365d`i')!=. // increase in creatinine >= 3  
+	replace flag365d`i'=3 if (max_creat`i'-median365d`i')>=354 & (max_creat`i'-median365d`i')!=. // increase in creatinine >= 354 umol/L 
+	
+	egen akimax`i' = rowmax(flag2d`i' flag7d`i' flag365d`i') // highest stage across 2d/7d/365d criteria  
+	replace aki_stage = akimax`i' if `i'==creat_count & !missing(akimax`i') // final AKI stage for that creatinine 
+	replace aki_yn = 1 if aki_stage==1 | aki_stage==2 | aki_stage==3 // yes/no dummy 
+	
+	*start of AKI episode
+	bysort study_patient_id (creat_dt) : replace aki_start_dt = creat_dt if aki_yn==1 & aki_yn[_n-1]!=1 // first ever AKI episode
+	replace aki_start_dt = creat_dt if aki_yn==1 & aki_ever==1 & aki_restart==1 // subsequent new AKI 
+	replace aki_end_dt = aki_start_dt+7 if aki_start_dt!=.
+	bysort study_patient_id (creat_dt) : replace aki_start_dt = last_aki_st_dt`i' if creat_dt<=last_aki_end_dt`i' & creat_dt>=last_aki_st_dt`i' & !missing(last_aki_st_dt`i') // use the date of the previous AKI episode start if AKI is ongoing  
+	
+	bysort study_patient_id (creat_dt) : replace aki_base2d = low2d`i' if `i'==creat_count
+	bysort study_patient_id (creat_dt) : replace aki_base7d = low7d`i' if `i'==creat_count
+	bysort study_patient_id (creat_dt) : replace aki_base365d = median365d`i' if `i'==creat_count
+	bysort study_patient_id (creat_dt) : replace aki2d = flag2d`i' if `i'==creat_count & flag2d`i'!=.
+	bysort study_patient_id (creat_dt) : replace aki7d = flag7d`i' if `i'==creat_count & flag7d`i'!=.
+	bysort study_patient_id (creat_dt) : replace aki365d = flag365d`i' if `i'==creat_count & flag365d`i'!=.
+	
+	drop last_aki_end_dt`i' creat_dt_`i' current_dt`i' max_dt`i' mark2d`i' mark7d`i' mark365d`i' creat2d`i' creat7d`i' creat365d`i' low2d`i' low7d`i'  median365d`i' last_aki_st_dt`i' recass7_dt`i' current_creat`i' max_creat`i' flag2d`i' flag7d`i' flag365d`i' akimax`i' 
+} // REPEAT LOOP FOR THE NEXT CREATININE RESULT 
+
+format *dt* %d
+
+*spell counter
+bysort study_patient_id (creat_dt) : gen aki_begin = (aki_yn==1) & aki_yn != aki_yn[_n-1]
+bysort study_patient_id (creat_dt) : gen aki_episode = cond(aki_yn==1, sum(aki_begin), .)
+sum aki_episode, d 
+
+********************************************************************************
+*Assess recovery
+********************************************************************************
+*baseline creatinine used to assess recovery
+egen aki_base = rowmin(aki_base7d aki_base365d) // use the baseline that triggered the highest aki stage (lowest baseline value) to assess recovery 
+bysort study_patient_id aki_start_dt (creat_dt) : egen aki_baseline = max(aki_base)
+	
+keep if aki_start_dt!=.
+gen aki_recovery=.
+*date of recovery assessment - last day of episode 
+bysort study_patient_id aki_start_dt (creat_dt) : gen last = 1 if _n == _N
+gen fin_creat = creatinine if last==1 
+bysort study_patient_id aki_start_dt (creat_dt) : egen final_creat = max(fin_creat)
+
+*recovery status
+replace aki_recovery = 0 if (final_creat/aki_baseline)<=1.2 // complete 
+replace aki_recovery = 1 if (final_creat/aki_baseline)>1.2 & (final_creat/aki_baseline)<=1.5 // partial 
+replace aki_recovery = 2 if (final_creat/aki_baseline)>1.5 // non recovery
+bysort study_patient_id aki_start_dt (creat_dt) : replace aki_recovery = 3 if _N==1   // untested 
+
+label define rec_lb 0 "Complete" 1 "Partial" 2 "Non-recovery" 3 "Untested"
+label values aki_recovery rec_lb
