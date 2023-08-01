@@ -1,6 +1,5 @@
 # AKIalgorithm
-AKI detection based on KDIGO creatinine criteria
-this algorithm assesses longitudinal creatinine results and stages each creatinine as 0, 1, 2 or 3.
+AKI detection based on KDIGO creatinine criteria. this algorithm assesses longitudinal creatinine results and stages each creatinine as 0, 1, 2 or 3.
 
 Baseline creatinine:
 Lookback:
